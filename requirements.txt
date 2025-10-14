@@ -1,0 +1,8 @@
+faster-whisper 
+httpx 
+numpy 
+openwakeword 
+piper-tts
+scipy
+sounddevice 
+webrtcvad 
