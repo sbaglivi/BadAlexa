@@ -33,6 +33,7 @@ class ChunkStreamer:
 
         # soft boundary if we already have enough text
         if (m := utils.last_iter_value(SOFT_RE.finditer(self.buffer))):
+            cut = m.end()
             v, self.buffer = self.buffer[:cut], self.buffer[cut:]
             self.vocal_q.put(v)
 

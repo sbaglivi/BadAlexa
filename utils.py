@@ -1,5 +1,6 @@
 import queue
 import numpy as np
+from collections import deque
 
 
 def chunk_by_len(arr, cl):
@@ -26,3 +27,13 @@ def to_int16(pcm_f32):
     # sd outputs values in [-1,1] range
     # whisper expects them as int16 [-32768, 32767], we go by 1 less to avoid overflow
     return (pcm_f32 * 32767).astype(np.int16)
+
+def compute_rms(int16_chunk: np.ndarray) -> float:
+    # Convert int16 PCM to float in [-1, 1] and compute RMS
+    f32 = int16_chunk.astype(np.float32) / 32768.0
+    return float(np.sqrt(np.mean(f32 ** 2))) if f32.size else 0.0
+
+def trim_deque(dq: deque, keep: int):
+    # Remove items from the left until length <= keep
+    while len(dq) > keep:
+        dq.popleft()
