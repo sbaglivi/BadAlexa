@@ -18,7 +18,7 @@ RATE = 16000
 CHANNELS = 1
 BLOCKSIZE = 320        # 20 ms @ 16 kHz; one queue item = 320 samples
 PREROLL_MS = 500
-RESPONSE_AWAIT_MS = 2500
+RESPONSE_AWAIT_S = 2.5
 TRAIL_SIL_MS = 1000     # stop after this much silence
 MAX_UTTER_S = 20.
 OWW_CHUNK = 1280       # OWW wants 1280 samples (~80 ms)
@@ -114,7 +114,7 @@ class App:
                         self.state.last_voiced_ts = ts
                         continue
 
-                    if self.state.last_voiced_ts is None and (ts - self.state.start_ts) >= RESPONSE_AWAIT_MS:
+                    if self.state.last_voiced_ts is None and (ts - self.state.start_ts) >= RESPONSE_AWAIT_S:
                         self.state = state.Idle
                         self.utter_buf.clear()
                         continue
