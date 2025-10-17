@@ -47,21 +47,27 @@ def is_user_speaking(block_f32, tts_rms=None, last_tts_end_ts=None):
 
 class App:
     def __init__(self):
+        # State and queues
         self.state = state.Idle
         self.audio_q = queue.Queue()
         def audio_callback(indata, frames, time_info, status):
             pcm_f32 = indata[:,0]
             self.audio_q.put((time.time(), pcm_f32.copy()))
 
+        # Audio input stream
         self.stream = sd.InputStream(
             samplerate=RATE, blocksize=BLOCKSIZE, channels=CHANNELS,
             dtype="float32", callback=audio_callback
         )
-        self.vocalizer = None
-        self.user_speech_counter = 0
         self.stream.start()
+
+        # Long-lived components
+        self.vocalizer = vocalize.Vocalizer()
+        self.vocalizer.start()
+
+        # Audio buffers and state
+        self.user_speech_counter = 0
         self.wake_buf = np.array([], dtype=np.float32)
-        # self.wake_buf = deque(maxlen=int((PREROLL_MS/1000)*RATE))
         self.utter_buf = deque(maxlen=int(MAX_UTTER_S * RATE))
         self.stop_event = threading.Event()
         self.last_audio = time.time()
@@ -129,7 +135,7 @@ class App:
                     buffer = np.array(list(self.utter_buf), dtype=np.float32)
                     result = transcribe.transcribe(buffer)
                     self.utter_buf.clear()
-                    self.vocalizer = vocalize.Vocalizer(self.stop_event)
+                    self.vocalizer.reset()  # Reset state for new conversation
                     self.state = state.Generating(prev_turns + [("user", result)])
                     self.generation_thread = threading.Thread(target=llm.wrapper, args=(self.state.prev_turns, self.stop_event, self.vocalizer.tts_q))
                     self.generation_thread.start()
@@ -147,19 +153,24 @@ class App:
                     if self.user_speech_counter > 3:  # ~60 ms of continuous speech
                         preroll_samples = int(RATE * 0.1) # 100ms
                         print("STOP EVENT user speech detected while generating")
+                        # Signal all components to stop
                         self.stop_event.set()
                         self.generation_thread.join()
-                        self.vocalizer.thread.join()
+                        
+                        # Get actually vocalized text before reset
+                        vocalized = self.vocalizer.get_last_vocalized_text()
+                        self.vocalizer.reset()  # Clean up current utterance
+                        
+                        # Prepare for next utterance
                         ts = time.time()
                         self.stop_event.clear()
-                        vocalized = "".join(self.vocalizer.spoken)
                         utils.trim_deque(self.utter_buf, preroll_samples)
                         self.state = state.Listening(prev_turns=prev_turns + [("assistant", vocalized)], last_voiced_ts=ts, start_ts=ts)
                     else:
-                        if self.generation_thread.is_alive() or self.vocalizer.thread.is_alive():
+                        if self.generation_thread.is_alive() or self.vocalizer.is_speaking():
                             continue
 
-                        vocalized = "".join(self.vocalizer.spoken)
+                        vocalized = self.vocalizer.get_last_vocalized_text()
                         ts = time.time()
                         self.state = state.Listening(prev_turns=prev_turns + [("assistant", vocalized)], last_voiced_ts=None, start_ts=ts)
                         self.utter_buf.clear()
