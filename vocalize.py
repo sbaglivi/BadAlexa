@@ -12,10 +12,10 @@ SAMPLE_RATE = 22050                 # set to your model's rate (e.g., 16000, 220
 
 
 class Vocalizer:
-    def __init__(self):
+    def __init__(self, tts_q: queue.Queue, stop_event: threading.Event):
         # TTS model and queue
         self.voice = PiperVoice.load("./" + MODEL)
-        self.tts_q: queue.Queue[str] = queue.Queue()
+        self.tts_q = tts_q
         self.max_chunk_length = 12000
 
         # State tracking
@@ -24,33 +24,19 @@ class Vocalizer:
         self.last_tts_end = None
         
         # Thread control
-        self._stop_event = threading.Event()
+        self._stop_event = stop_event
         self._worker_thread = None
+
+    def get_rms_and_last_ts(self):
+        return self.tts_rms, self.last_tts_end
 
     def start(self):
         """Start the TTS worker thread."""
-        if self._worker_thread is not None:
-            return
-        self._stop_event.clear()
-        self._worker_thread = threading.Thread(target=self._tts_worker, daemon=True)
-        self._worker_thread.start()
-
-    def stop(self):
-        """Stop the TTS worker thread and cleanup."""
-        if self._worker_thread is None:
-            return
-        self._stop_event.set()
-        self.stop_playback = True
-        utils.empty(self.tts_q)  # Clear pending texts
-        self._worker_thread.join()
-        self._worker_thread = None
-
-    def reset(self):
-        """Reset state between conversations while keeping thread alive."""
         self.vocalized_text = ""
         self.tts_rms = None
         self.last_tts_end = None
-        utils.empty(self.tts_q)
+        self._worker_thread = threading.Thread(target=self._tts_worker, daemon=True)
+        self._worker_thread.start()
         
     def is_speaking(self):
         """Public interface to check if vocalization is in progress."""
@@ -70,10 +56,9 @@ class Vocalizer:
 
             if chunk == "":  # Signal to finish current conversation
                 self.tts_q.task_done()
-                continue
+                break
 
             self.speak(chunk)
-            self.spoken.append(chunk)
             self.tts_q.task_done()
 
     def add_to_q(self, text: str):
@@ -90,14 +75,13 @@ class Vocalizer:
             """Short-lived worker that handles audio output for one utterance."""
             nonlocal played_size
             with sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as stream:
-                while True:
+                while not self._stop_event.is_set():
                     try:
                         chunk = audio_q.get(timeout=0.1)
                     except queue.Empty:
-                        if self._stop_event.is_set():
-                            break
                         continue
-                    
+
+                    # otherwise if a chunk is present, we will only stop after vocalizing it
                     if chunk is None or self._stop_event.is_set():
                         break
 
@@ -127,4 +111,4 @@ class Vocalizer:
         if total_size > 0:
             vocalized_portion = played_size / total_size
             vocalized_chars = int(len(text) * vocalized_portion)
-            self.vocalized_text = text[:vocalized_chars]
+            self.vocalized_text += text[:vocalized_chars]

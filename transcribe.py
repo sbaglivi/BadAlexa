@@ -4,6 +4,8 @@ import numpy as np
 import tempfile
 from scipy.signal import butter, lfilter
 from faster_whisper import WhisperModel
+from datetime import datetime
+
 import utils
 
 RATE = 16000
@@ -22,12 +24,12 @@ def rms_normalize(x, target_dbfs=-23.0, eps=1e-7):
     y = x * gain
     return np.clip(y, -1.0, 1.0)
 
-def write_wav(path, int16_pcm, rate=RATE):
-    with wave.open(path, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(rate)
-        wf.writeframes(int16_pcm.tobytes())
+def write_wav(fpath, int16_pcm, rate=RATE):
+    with wave.open(fpath, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(int16_pcm.tobytes())
 
 def transcribe(audio) -> str:
     # Pulse-Code Modulation: most common way to digitally represent analog audio signals.
@@ -40,13 +42,11 @@ def transcribe(audio) -> str:
     pcm_i16 = utils.to_int16(pcm_f32)
 
     # save temp WAV for Whisper
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp.close()
-    write_wav(tmp.name, pcm_i16, RATE)
+    fpath = utils.log_path / (datetime.now().strftime("%H:%M:%S") + ".wav")
+    write_wav(str(fpath), pcm_i16, RATE)
 
     # transcribe
-    segs, _info = whisper.transcribe(tmp.name, language=None)
+    segs, _info = whisper.transcribe(str(fpath), language=None)
     text = "".join(s.text for s in segs).strip()
     print("tr", text)
-    os.unlink(tmp.name)
     return text

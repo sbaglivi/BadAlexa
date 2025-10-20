@@ -51,3 +51,4 @@ TODO:
 - sometimes after the wakeword the model goes to conversation with segments of audio that are empty (and it detects "thank you"?). 
   I think there should be some sort of filter that helps it understand that it does not have enough input to work on yet and a timeout for no request arrives.
 - add debug feature that logs conversation turns and flow locally
+- add proper shutdown cleanup for all components

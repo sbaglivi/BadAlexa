@@ -4,17 +4,16 @@ import queue
 import sounddevice as sd
 from collections import deque
 import numpy as np
-import webrtcvad
 import threading
 
 import utils
+import vad
 import wakeword
 import state
 import transcribe
 import vocalize
 import llm
 
-RATE = 16000
 CHANNELS = 1
 BLOCKSIZE = 320        # 20 ms @ 16 kHz; one queue item = 320 samples
 PREROLL_MS = 500
@@ -23,27 +22,6 @@ TRAIL_SIL_MS = 1000     # stop after this much silence
 MAX_UTTER_S = 20.
 OWW_CHUNK = 1280       # OWW wants 1280 samples (~80 ms)
 
-
-vad = webrtcvad.Vad(3)
-def is_user_speaking(block_f32, tts_rms=None, last_tts_end_ts=None):
-    ts = time.time()
-    pcm = utils.to_int16(block_f32).tobytes()
-    vad_result = vad.is_speech(pcm, RATE)
-
-    # No recent TTS → just return VAD
-    if not (last_tts_end_ts and ts - last_tts_end_ts < 4.5 and tts_rms is not None):
-        return vad_result
-
-    # --- During or right after TTS ---
-    energy = utils.compute_rms(block_f32) * 32768
-    tts_rms = max(1e-3, min(tts_rms, 2e-2))
-    ratio = energy / tts_rms
-
-    # Less strict threshold
-    if ratio < 1.7:   # instead of 1.9
-        return False
-
-    return vad_result
 
 class App:
     def __init__(self):
@@ -56,22 +34,23 @@ class App:
 
         # Audio input stream
         self.stream = sd.InputStream(
-            samplerate=RATE, blocksize=BLOCKSIZE, channels=CHANNELS,
+            samplerate=utils.RATE, blocksize=BLOCKSIZE, channels=CHANNELS,
             dtype="float32", callback=audio_callback
         )
         self.stream.start()
 
-        # Long-lived components
-        self.vocalizer = vocalize.Vocalizer()
-        self.vocalizer.start()
-
         # Audio buffers and state
         self.user_speech_counter = 0
         self.wake_buf = np.array([], dtype=np.float32)
-        self.utter_buf = deque(maxlen=int(MAX_UTTER_S * RATE))
+        self.utter_buf = deque(maxlen=int(MAX_UTTER_S * utils.RATE))
         self.stop_event = threading.Event()
         self.last_audio = time.time()
         self.i = 0
+
+        # Long-lived components
+        self.tts_q = queue.Queue()
+        self.llm_client = llm.LLMClient([], self.stop_event, self.tts_q)
+        self.vocalizer = vocalize.Vocalizer(self.tts_q, self.stop_event)
 
     
     def get_audio(self):
@@ -82,7 +61,7 @@ class App:
             self.last_audio = ts
         ts = time.time()
         bts, block_f32 = self.audio_q.get()                    # 20 ms, 320 float32 samples
-        while ts - bts > .5:
+        while ts - bts > .2:
             bts, block_f32 = self.audio_q.get()                    # 20 ms, 320 float32 samples
         self.last_block = block_f32
         if self.state == state.Idle:
@@ -100,79 +79,78 @@ class App:
                         if not wakeword.predict(utils.to_int16(chunk80_f32)):
                             continue
 
-                        wakeword.predict(np.zeros(int(RATE * 1.0), dtype=np.int16))
+                        wakeword.predict(np.zeros(int(utils.RATE * 1.0), dtype=np.int16))
                         print("Found!")
-                        tail_len = int(0.150 * RATE)
+                        tail_len = int(0.150 * utils.RATE)
                         self.utter_buf.extend(self.wake_buf[-tail_len:])
                         self.wake_buf = np.array([], dtype=np.float32)
                         ts = time.time()
-                        self.state = state.Listening(prev_turns=[], last_voiced_ts=ts, start_ts=ts)
+                        self.state = state.Listening(last_voiced_ts=ts, start_ts=ts)
                         break
 
-                case state.Listening(prev_turns, last_voiced_ts, start_ts):
-                    tts_rms, last_end = 0., None
-                    if self.vocalizer is not None:
-                        tts_rms, last_end = self.vocalizer.tts_rms, self.vocalizer.last_tts_end
-                    user_speaking = is_user_speaking(self.last_block, tts_rms, last_end)
+                case state.Listening(last_voiced_ts, start_ts):
+                    tts_rms, last_end = self.vocalizer.get_rms_and_last_ts()
+                    user_speaking = vad.is_user_speaking(self.last_block, tts_rms, last_end)
                     # user_speaking = vad.is_speech(utils.to_int16(self.last_block).tobytes(), RATE)
                     ts = time.time()
                     if user_speaking:
                         self.state.last_voiced_ts = ts
                         continue
 
-                    if self.state.last_voiced_ts is None and (ts - self.state.start_ts) >= RESPONSE_AWAIT_S:
+                    if last_voiced_ts is None and (ts - start_ts) >= RESPONSE_AWAIT_S:
+                        print("back to idle")
                         self.state = state.Idle
+                        self.llm_client.reset_context()
                         self.utter_buf.clear()
                         continue
 
-                    if self.state.last_voiced_ts is not None and (ts - self.state.last_voiced_ts) < TRAIL_SIL_MS/1000:
+                    if last_voiced_ts is not None and (ts - last_voiced_ts) < TRAIL_SIL_MS/1000:
                         continue
                     
-                    if len(self.utter_buf) < int(0.3 * RATE):
+                    if len(self.utter_buf) < int(0.3 * utils.RATE):
                         self.utter_buf.clear()
                         continue
 
                     buffer = np.array(list(self.utter_buf), dtype=np.float32)
                     result = transcribe.transcribe(buffer)
+                    # empty q, reset stop event, clear audio accumulated
+                    utils.empty(self.tts_q)
+                    self.stop_event.clear()
                     self.utter_buf.clear()
-                    self.vocalizer.reset()  # Reset state for new conversation
-                    self.state = state.Generating(prev_turns + [("user", result)])
-                    self.generation_thread = threading.Thread(target=llm.wrapper, args=(self.state.prev_turns, self.stop_event, self.vocalizer.tts_q))
-                    self.generation_thread.start()
+                    self.vocalizer.start()
+                    self.llm_client.add_message("user", result)
+                    self.llm_client.start()
+                    self.state = state.Generating
                     print("started generating and vocalizing!")
-                case state.Generating(prev_turns):
-                    tts_rms, last_end = 0., None
-                    if self.vocalizer is not None:
-                        tts_rms, last_end = self.vocalizer.tts_rms, self.vocalizer.last_tts_end
-                    user_speaking = is_user_speaking(self.last_block, tts_rms, last_end)
-                    if user_speaking:
-                        self.user_speech_counter += 1
-                    else:
-                        self.user_speech_counter = 0
 
-                    if self.user_speech_counter > 3:  # ~60 ms of continuous speech
-                        preroll_samples = int(RATE * 0.1) # 100ms
+                case state.Generating:
+                    if vad.is_user_speaking(self.last_block, *(self.vocalizer.get_rms_and_last_ts()), debug=True):
+                        self.user_speech_counter += 1
+
+                    if self.user_speech_counter > 4:  # ~20 ms of continuous speech each
+                        self.user_speech_counter = 0
+                        preroll_samples = int(utils.RATE * 0.5) # 0.1 = 100ms
                         print("STOP EVENT user speech detected while generating")
                         # Signal all components to stop
                         self.stop_event.set()
-                        self.generation_thread.join()
-                        
+                        utils.empty(self.tts_q)
                         # Get actually vocalized text before reset
                         vocalized = self.vocalizer.get_last_vocalized_text()
-                        self.vocalizer.reset()  # Clean up current utterance
                         
                         # Prepare for next utterance
                         ts = time.time()
-                        self.stop_event.clear()
                         utils.trim_deque(self.utter_buf, preroll_samples)
-                        self.state = state.Listening(prev_turns=prev_turns + [("assistant", vocalized)], last_voiced_ts=ts, start_ts=ts)
+                        self.llm_client.add_message("assistant", vocalized)
+                        self.state = state.Listening(last_voiced_ts=ts, start_ts=ts)
                     else:
-                        if self.generation_thread.is_alive() or self.vocalizer.is_speaking():
+                        if self.vocalizer.is_speaking():
                             continue
 
+                        self.user_speech_counter = 0
                         vocalized = self.vocalizer.get_last_vocalized_text()
                         ts = time.time()
-                        self.state = state.Listening(prev_turns=prev_turns + [("assistant", vocalized)], last_voiced_ts=None, start_ts=ts)
+                        self.llm_client.add_message("assistant", vocalized)
+                        self.state = state.Listening(last_voiced_ts=None, start_ts=ts)
                         self.utter_buf.clear()
                         self.stop_event.clear()
                         print("no user speech detected and gen done, now back to listening")

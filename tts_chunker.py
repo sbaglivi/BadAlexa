@@ -1,11 +1,12 @@
 import re
 import utils
+import queue
 
 SENTENCE_RE = re.compile(r'[\.!\?…]+[\"\')\]]*\s')   # sentence enders
 SOFT_RE     = re.compile(r'[,;:\n]\s')               # softer pauses
 
 class ChunkStreamer:
-    def __init__(self, vocal_q, *, min_sent_len: int = 80):
+    def __init__(self, vocal_q: queue.Queue, min_sent_len: int = 80):
         self.vocal_q = vocal_q
         self.buffer = ""
         self.min_sent_len = min_sent_len

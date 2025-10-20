@@ -1,7 +1,11 @@
 import queue
 import numpy as np
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 
+RATE = 16000
+Message= tuple[str, str]
 
 def chunk_by_len(arr, cl):
     for i in range(0, len(arr), cl):
@@ -37,3 +41,7 @@ def trim_deque(dq: deque, keep: int):
     # Remove items from the left until length <= keep
     while len(dq) > keep:
         dq.popleft()
+
+start = datetime.now().strftime("%m-%d_%H:%M:%S")
+log_path = Path(f"./history/{start}")
+log_path.mkdir(0o755, exist_ok=True)
