@@ -42,13 +42,8 @@ The LLM will stream its response on a queue, from which piper will retrieve chun
 If during the LLM response you start speaking, the model will stop and listen for additional input, before producing an updated response.  
 After every response, the model keeps listening for a few seconds to see if you have a follow up request, otherwise it goes back to idle and requires the wakeword again to activate.
 
-## Current state and TODOs:
+## Todo:
 
-Works on my machine™. Jokes aside, this is missing a getting started section, which will be added.  
-Right now the source code relies on the user having Ollama installed and running and on having downloaded an openwakeword model (in my case "hey_mycroft_v0.1.onnx") and a vocalizer (piper) with a chosen voice (in my case "en_US-amy-medium.onnx").
-
-TODO:
 - sometimes after the wakeword the model goes to conversation with segments of audio that are empty (and it detects "thank you"?). 
   I think there should be some sort of filter that helps it understand that it does not have enough input to work on yet and a timeout for no request arrives.
 - add debug feature that logs conversation turns and flow locally
-- add proper shutdown cleanup for all components
